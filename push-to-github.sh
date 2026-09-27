@@ -54,7 +54,7 @@ fi
 
 if git remote get-url origin >/dev/null 2>&1; then
   current="$(git remote get-url origin)"
-  wanted="https://github.com/$OWNER/$REPO_NAME.git"
+  wanted="https://$OWNER@github.com/$OWNER/$REPO_NAME.git"
   if [ "$current" != "$wanted" ]; then
     echo "Pointing origin at $wanted (was $current)"
     git remote set-url origin "$wanted"
@@ -69,7 +69,7 @@ if ! git remote get-url origin >/dev/null 2>&1; then
     echo "No 'origin' remote yet and gh is not installed."
     echo "1. Sign in to GitHub as $OWNER and create an EMPTY public repo called $REPO_NAME (no README)."
     echo "2. Run this script again."
-    git remote add origin "https://github.com/$OWNER/$REPO_NAME.git"
+    git remote add origin "https://$OWNER@github.com/$OWNER/$REPO_NAME.git"
     exit 1
   fi
 fi
