@@ -4,10 +4,25 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-REPO_NAME="ssac-splitsecond"
-OWNER="theoq71"
+REPO_NAME="SSAC-Video-Analysis-Testing"
 AUTHOR_NAME="theoq71"
 AUTHOR_EMAIL="133422938+theoq71@users.noreply.github.com"
+
+# Which GitHub account owns the repo. Saved in github.conf (git-ignored) after the first run.
+CONF="github.conf"
+if [ -f "$CONF" ]; then
+  # shellcheck disable=SC1090
+  . "./$CONF"
+fi
+if [ -z "${OWNER:-}" ]; then
+  echo "Which GitHub account should own the repo?"
+  echo "This is the username shown under the avatar on github.com (letters, digits, dashes), not the email."
+  read -r -p "GitHub username: " OWNER
+  OWNER="${OWNER//@*/}"
+  [ -n "$OWNER" ] || { echo "No username given. Stopping."; exit 1; }
+  printf 'OWNER=%s\n' "$OWNER" > "$CONF"
+  echo "Saved to $CONF. Edit that file to change it later."
+fi
 
 # Clear leftovers from interrupted git runs.
 rm -f .git/*.lock 2>/dev/null || true
@@ -35,6 +50,15 @@ if ! git diff --cached --quiet || ! git rev-parse HEAD >/dev/null 2>&1; then
   echo "committed"
 else
   echo "nothing new to commit"
+fi
+
+if git remote get-url origin >/dev/null 2>&1; then
+  current="$(git remote get-url origin)"
+  wanted="https://github.com/$OWNER/$REPO_NAME.git"
+  if [ "$current" != "$wanted" ]; then
+    echo "Pointing origin at $wanted (was $current)"
+    git remote set-url origin "$wanted"
+  fi
 fi
 
 if ! git remote get-url origin >/dev/null 2>&1; then

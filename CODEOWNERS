@@ -1,0 +1,9 @@
+# Who reviews changes to which folder. Fill in the GitHub usernames.
+# Lines starting with # are comments. Format: <path> <github user>
+/core/              @theoq71
+/modules/dive/      @theoq71
+/modules/underwater/  # @jasper-github-name
+/modules/swim/        # @lewis-github-name
+/modules/turn/        # @anthony-github-name
+/modules/event_above/       @theoq71
+/modules/event_underwater/  @theoq71

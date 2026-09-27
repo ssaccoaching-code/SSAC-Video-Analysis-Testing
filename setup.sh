@@ -7,5 +7,6 @@ if [ ! -d .venv ]; then
 fi
 .venv/bin/python -m pip install --upgrade pip >/dev/null
 .venv/bin/python -m pip install -r requirements.txt
+for extra in modules/*/requirements.txt; do .venv/bin/python -m pip install -q -r "$extra"; done
 echo
 echo "Done. Activate with:  source .venv/bin/activate"

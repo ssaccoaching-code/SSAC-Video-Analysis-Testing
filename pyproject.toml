@@ -3,8 +3,8 @@ name = "ssac-splitsecond"
 version = "0.1.0"
 description = "SSAC SplitSecond swim video analyzer"
 requires-python = ">=3.10"
-dependencies = ["opencv-python", "numpy"]
+dependencies = ["opencv-python", "numpy", "streamlit", "matplotlib"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "modules"]
 pythonpath = ["."]

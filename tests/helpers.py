@@ -1,7 +1,8 @@
 """Shared test helpers. Every module test file imports from here.
 
 Tests are written with unittest so they run with either command:
-    python -m pytest
+    python -m pytest            (everything)
+    python -m pytest modules/dive   (one module)
     python -m unittest
 """
 
@@ -18,9 +19,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from splitsecond.core.types import Result  # noqa: E402
-from splitsecond.core.video import ArrayClip, Clip, VideoFileClip, blank_frame  # noqa: E402
-from splitsecond.modules.base import AnalysisModule  # noqa: E402
+from core.types import Result  # noqa: E402
+from core.video import ArrayClip, Clip, VideoFileClip, blank_frame  # noqa: E402
+from core.base import AnalysisModule  # noqa: E402
 
 
 def moving_dot_clip(frames: int = 60, fps: float = 30.0, width: int = 320, height: int = 180) -> ArrayClip:
@@ -41,6 +42,18 @@ def synthetic_file_clip(seconds: float = 3.0) -> VideoFileClip | None:
     folder = tempfile.mkdtemp(prefix="splitsecond_")
     try:
         path = make_clip(os.path.join(folder, "sprint.mp4"), seconds=seconds)
+    except RuntimeError:
+        return None
+    return VideoFileClip(path)
+
+
+def synthetic_event_clip(lengths: int = 4, seconds: float = 40.0) -> VideoFileClip | None:
+    """A multi-length cartoon written to a temp file, or None if this machine cannot encode video."""
+    from tools.make_sample_clip import make_clip
+
+    folder = tempfile.mkdtemp(prefix="splitsecond_")
+    try:
+        path = make_clip(os.path.join(folder, "event.mp4"), seconds=seconds, lengths=lengths)
     except RuntimeError:
         return None
     return VideoFileClip(path)
@@ -69,7 +82,7 @@ class ModuleContractTest:
         self.assertEqual(len(set(self.module.metric_keys)), len(self.module.metric_keys), "duplicate metric keys")
 
     def test_is_registered(self) -> None:
-        from splitsecond.modules import MODULES
+        from modules import MODULES
 
         self.assertIs(MODULES.get(self.module.name), self.module_class)
 

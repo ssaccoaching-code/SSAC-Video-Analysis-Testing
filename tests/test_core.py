@@ -2,10 +2,10 @@ import json
 import unittest
 
 from tests.helpers import ArrayClip, blank_frame, moving_dot_clip, synthetic_file_clip
-from splitsecond.core.report import to_json, to_text
-from splitsecond.core.types import Result
-from splitsecond.modules import MODULES, get_module, module_names
-from splitsecond.modules.base import fill_defaults
+from core.report import to_json, to_text
+from core.types import Result
+from modules import MODULES, get_module, module_names
+from core.base import fill_defaults
 
 
 class ClipTests(unittest.TestCase):
@@ -54,7 +54,7 @@ class OptionTests(unittest.TestCase):
 
 class RegistryTests(unittest.TestCase):
     def test_all_modules_registered(self) -> None:
-        self.assertEqual(module_names(), ["dive", "underwater", "swim", "turn"])
+        self.assertEqual(module_names(), ["dive", "underwater", "swim", "turn", "event_above", "event_underwater"])
         for name, cls in MODULES.items():
             self.assertEqual(cls.name, name)
 
