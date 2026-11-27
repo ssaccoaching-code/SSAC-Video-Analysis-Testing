@@ -16,17 +16,17 @@ Swim race video analyzer for the SSAC team.
 | `modules/underwater/` | Underwater module: kicks, breakout | (name) |
 | `modules/swim/` | Swim module: strokes, tempo, splits | (name) |
 | `modules/turn/` | Turn module: flip and open turns | (name) |
-| `modules/event_above/` | Whole event from an above-water camera, any number of lengths (runs the four phase modules on every length) | Elaine and Ken |
-| `modules/event_underwater/` | Whole event from an underwater camera, any number of lengths | Elaine and Ken |
-| `modules/__init__.py` | The list of modules (`MODULES`) | Elaine and Ken |
-| `run.py` | Team terminal script: runs any or all modules | Elaine and Ken |
-| `app.py` | Team web page: pick a phase or the whole lap, upload, get the report | Elaine and Ken |
+| `modules/event_above/` | Whole event from an above-water camera, any number of lengths (runs the four phase modules on every length) | (name) |
+| `modules/event_underwater/` | Whole event from an underwater camera, any number of lengths | (name) |
+| `modules/__init__.py` | The list of modules (`MODULES`) | Theo |
+| `run.py` | Team terminal script: runs any or all modules | Theo |
+| `app.py` | Team web page: pick a phase or the whole lap, upload, get the report | Theo |
 | `calibration/` | Saved camera calibrations (JSON), written by the web page | anyone |
 | `tests/` | Tests for `core/` and the shared contract test | Elaine and Ken |
 | `tools/make_sample_clip.py` | Makes a cartoon clip for testing | anyone |
 | `samples/` | Put video clips here (not saved to git) | anyone |
 | `results/` | JSON output goes here (not saved to git) | anyone |
-| `CODEOWNERS` | Who reviews which folder on GitHub | Elaine and Ken |
+| `CODEOWNERS` | Who reviews which folder on GitHub | SSAC |
 
 ## Inside each module folder
 
