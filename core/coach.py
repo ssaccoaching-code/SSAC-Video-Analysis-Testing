@@ -122,7 +122,7 @@ def coach(results: list[Result]) -> Advice:
     if not m:
         advice.summary.append("Nothing was measured in this clip, so there is no summary or plan.")
         return advice
-    rough = any("guessed scale" in n or "no calibration" in n for n in notes)
+    rough = _is_rough(notes)
     findings: list[_Finding] = []
 
     # ------------------------------------------------------------ the start
@@ -365,3 +365,192 @@ def _describe(results: list[Result], m: dict[str, Any]) -> str:
     if not measured:
         return ""
     return "Measured: " + ", ".join(measured) + "."
+
+
+# ---------------------------------------------------------------- comparing clips
+
+# how to talk about a metric when two clips are compared: (noun, unit, decimals, better)
+# better: "high", "low", "band" (closest to the band centre wins) or None (no better side)
+PHRASES: dict[str, tuple[str, str, int, str | None]] = {
+    "reaction_time_s": ("reaction time", "s", 2, "low"),
+    "flight_time_s": ("flight time", "s", 2, "band"),
+    "entry_distance_m": ("entry distance", "m", 2, "high"),
+    "entry_angle_deg": ("body angle at entry", "deg", 0, "band"),
+    "entry_path_angle_deg": ("flight-path angle at entry", "deg", 0, "band"),
+    "entry_depth_m": ("entry depth", "m", 2, "band"),
+    "underwater_distance_m": ("underwater distance", "m", 1, "high"),
+    "underwater_time_s": ("underwater time", "s", 2, None),
+    "kick_count": ("kick count", "", 0, None),
+    "breakout_speed_mps": ("breakout speed", "m/s", 2, "high"),
+    "breakout_slowdown_pct": ("slowdown before the breakout", "%", 0, "low"),
+    "peak_underwater_speed_mps": ("peak underwater speed", "m/s", 2, "high"),
+    "stroke_count": ("stroke count", "", 0, None),
+    "stroke_rate_spm": ("tempo", "strokes/min", 0, None),
+    "distance_per_stroke_m": ("distance per stroke", "m", 2, "high"),
+    "avg_speed_mps": ("average speed", "m/s", 2, "high"),
+    "swim_time_s": ("swim time", "s", 2, "low"),
+    "tempo_change_pct": ("tempo change", "%", 0, "band"),
+    "turn_in_time_s": ("time into the wall", "s", 2, "low"),
+    "turn_out_time_s": ("time out of the wall", "s", 2, "low"),
+    "turn_time_s": ("turn time", "s", 2, "low"),
+    "wall_contact_s": ("time on the wall", "s", 2, "low"),
+    "push_off_speed_mps": ("push-off speed", "m/s", 2, "high"),
+    "event_time_s": ("event time", "s", 2, "low"),
+    "speed_change_pct": ("speed change on the last length", "%", 0, "band"),
+    "strokes_change_pct": ("stroke count change on the last length", "%", 0, "band"),
+    "underwater_change_pct": ("underwater change on the last length", "%", 0, "band"),
+    "turn_time_avg_s": ("average turn time", "s", 2, "low"),
+}
+# clip-relative times say nothing about the swimmer
+SKIP_IN_COMPARE = {"movement_time_s", "entry_time_s", "breakout_time_s", "turn_zone_m", "turn_type", "lengths", "distance_m",
+                   "turn_count"}
+
+
+@dataclass
+class Comparison:
+    labels: list[str] = field(default_factory=list)
+    summary: list[str] = field(default_factory=list)          # the differences that matter, in plain words
+    rows: list[dict[str, Any]] = field(default_factory=list)   # one per metric: metric, values, status, best, difference
+    per_clip: dict[str, Advice] = field(default_factory=dict)  # each clip's own summary and plan
+    takeaways: dict[str, list[str]] = field(default_factory=dict)  # per clip: what it can borrow from the others
+    rough: list[str] = field(default_factory=list)             # clips whose distances use a rough scale
+    basis: str = BASIS
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"labels": list(self.labels), "summary": list(self.summary), "rows": [dict(r) for r in self.rows],
+                "per_clip": {k: v.to_dict() for k, v in self.per_clip.items()},
+                "takeaways": {k: list(v) for k, v in self.takeaways.items()}, "rough": list(self.rough), "basis": self.basis}
+
+
+def _is_rough(notes: list[str]) -> bool:
+    return any("guessed scale" in n or "no calibration" in n or "rough scale" in n or "no camera calibration" in n for n in notes)
+
+
+def _fmt(value: float, unit: str, decimals: int) -> str:
+    text = f"{value:.{decimals}f}"
+    return f"{text} {unit}".strip() if unit != "%" else f"{text}%"
+
+
+def _better(key: str, values: dict[str, float]) -> str | None:
+    """Label of the clip with the better value, or None when there is no better side."""
+    phrase = PHRASES.get(key)
+    direction = phrase[3] if phrase else (BANDS[key][2] if key in BANDS else None)
+    if direction is None or len(values) < 2:
+        return None
+    if direction == "high":
+        return max(values, key=lambda k: values[k])
+    if direction == "low":
+        return min(values, key=lambda k: values[k])
+    if key in BANDS:
+        lo, hi, _ = BANDS[key]
+        centre = (lo + hi) / 2
+        return min(values, key=lambda k: abs(values[k] - centre))
+    return None
+
+
+def _meaningful(key: str, spread: float, top: float) -> bool:
+    unit = PHRASES.get(key, ("", "", 2, None))[1]
+    if unit == "deg":
+        return spread >= 3.0
+    if unit == "s":
+        return spread >= 0.03
+    if unit == "%":
+        return spread >= 3.0
+    return spread >= 0.05 * max(abs(top), 1e-9) and spread > 0
+
+
+def compare(entries: list[tuple[str, list[Result]]]) -> Comparison:
+    """Put two or more clips of the same phase side by side and say what differs.
+
+    entries: (label, results) per clip, in the order the coach uploaded them.
+    """
+    from core.report import LABELS
+
+    out = Comparison(labels=[label for label, _ in entries])
+    flat: dict[str, dict[str, Any]] = {}
+    for label, results in entries:
+        m, _, notes = _flatten(results)
+        flat[label] = m
+        out.per_clip[label] = coach(results)
+        if _is_rough(notes):
+            out.rough.append(label)
+
+    keys: list[str] = []
+    for label, _ in entries:
+        for key in flat[label]:
+            if key not in keys and key not in SKIP_IN_COMPARE:
+                keys.append(key)
+
+    findings: list[tuple[float, str]] = []     # (how big the difference is, sentence)
+    borrow: dict[str, list[str]] = {label: [] for label, _ in entries}
+    for key in keys:
+        values = {label: _num(flat[label].get(key)) for label, _ in entries}
+        numeric = {k: v for k, v in values.items() if v is not None}
+        phrase = PHRASES.get(key)
+        noun, unit, decimals = (phrase[0], phrase[1], phrase[2]) if phrase else (LABELS.get(key, key).lower(), "", 2)
+        row: dict[str, Any] = {"metric": LABELS.get(key, key), "key": key, "values": {}, "status": {}, "best": "", "difference": ""}
+        for label, _ in entries:
+            v = values[label]
+            row["values"][label] = None if v is None else round(v, 3)
+            row["status"][label] = _where(v, key) if (v is not None and key in BANDS) else ""
+        if len(numeric) >= 2:
+            lo_label = min(numeric, key=lambda k: numeric[k])
+            hi_label = max(numeric, key=lambda k: numeric[k])
+            spread = numeric[hi_label] - numeric[lo_label]
+            best = _better(key, numeric)
+            if best is not None and key in BANDS and BANDS[key][2] == "band" and all(_where(v, key) == "good" for v in numeric.values()):
+                best = None   # inside the band there is no better side
+            row["best"] = best or ""
+            row["difference"] = _fmt(spread, unit, decimals) if spread > 0 else "same"
+            if _meaningful(key, spread, max(abs(v) for v in numeric.values())):
+                if best is None:
+                    sentence = (f"{noun.capitalize()}: {hi_label} {_fmt(numeric[hi_label], unit, decimals)}, "
+                                f"{lo_label} {_fmt(numeric[lo_label], unit, decimals)}.")
+                    if key in BANDS:
+                        lo, hi, _ = BANDS[key]
+                        sentence += f" Both inside the {_fmt(lo, unit, decimals)} to {_fmt(hi, unit, decimals)} target."
+                    weight = 0.5
+                else:
+                    others = [k for k in numeric if k != best]
+                    worst = max(others, key=lambda k: abs(numeric[k] - numeric[best]))
+                    gap = abs(numeric[best] - numeric[worst])
+                    band_note = ""
+                    if key in BANDS:
+                        lo, hi, direction = BANDS[key]
+                        st_best, st_worst = _where(numeric[best], key), _where(numeric[worst], key)
+                        band_text = f"{_fmt(lo, unit, decimals)} to {_fmt(hi, unit, decimals)}"
+                        if st_best == "good" and st_worst == "good":
+                            band_note = f" Both are inside the {band_text} target."
+                        elif st_best == "good":
+                            band_note = f" {best} is inside the {band_text} target; {worst} is not."
+                        elif st_worst == "poor":
+                            band_note = f" Neither reaches the {band_text} target."
+                        else:
+                            band_note = f" Target: {band_text}."
+                    sentence = (f"{best} has the better {noun}: {_fmt(numeric[best], unit, decimals)} against "
+                                f"{_fmt(numeric[worst], unit, decimals)} for {worst}, a gap of {_fmt(gap, unit, decimals)}.{band_note}")
+                    weight = gap / max(abs(numeric[best]), 1e-9)
+                    if key in BANDS:
+                        weight += {"poor": 1.0, "ok": 0.4, "good": 0.0}[_where(numeric[worst], key)]
+                        if _where(numeric[worst], key) != "good":
+                            borrow[worst].append(f"{noun.capitalize()}: {best} manages {_fmt(numeric[best], unit, decimals)}, "
+                                                 f"you {_fmt(numeric[worst], unit, decimals)}.")
+                findings.append((weight, sentence))
+        out.rows.append(row)
+
+    findings.sort(key=lambda f: -f[0])
+    if not keys:
+        out.summary.append("Nothing was measured in these clips, so there is nothing to compare.")
+    elif not findings:
+        out.summary.append("The clips measure within a hair of each other; no difference stands out.")
+    else:
+        out.summary.extend(sentence for _, sentence in findings[:6])
+        same = len(keys) - len(findings)
+        if same > 0:
+            out.summary.append(f"The other {same} measured number{'s are' if same != 1 else ' is'} within the noise of each other.")
+    if out.rough:
+        who = out.rough[0] if len(out.rough) == 1 else ", ".join(out.rough[:-1]) + " and " + out.rough[-1]
+        out.summary.append(f"Distances and speeds for {who} use a rough scale (no camera calibration), so compare those with care; "
+                           "times, angles and counts are fine.")
+    out.takeaways = {label: items[:4] for label, items in borrow.items()}
+    return out

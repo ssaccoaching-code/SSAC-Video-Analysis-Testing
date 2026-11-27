@@ -9,7 +9,9 @@ Run a page with:  streamlit run app.py
 from __future__ import annotations
 
 import io
+import json
 import os
+import re
 import tempfile
 from typing import Any
 
@@ -18,7 +20,7 @@ import streamlit as st
 from core.base import AnalysisModule
 from core.calibrate import Calibration, background_image, list_profiles, save_profile
 from core.paths import RESULTS
-from core.report import LABELS, coverage_message, format_value, to_json
+from core.report import LABELS, comparison_markdown, coverage_message, format_value, to_json
 from core.types import Result
 from core.video import Clip, open_clip
 
@@ -55,6 +57,9 @@ def sidebar_options() -> dict[str, Any]:
         turn_type = st.selectbox("Turn type", ["auto", "flip", "open"], index=0)
         if turn_type != "auto":
             options["turn_type"] = turn_type
+        height = st.number_input("Swimmer height (m), for the dive scale when the camera is not calibrated",
+                                 min_value=1.0, max_value=2.3, value=1.75, step=0.01)
+        options["swimmer_height_m"] = float(height)
         make_video = st.checkbox("Also make the overlay video (slower)", value=True)
         st.session_state["make_video"] = make_video
     with st.sidebar.expander("AI review", expanded=False):
@@ -62,7 +67,8 @@ def sidebar_options() -> dict[str, Any]:
 
         if ai.available():
             use_ai = st.checkbox(f"Ask {ai.provider_name()} to review the numbers and key frames", value=True)
-            model = st.selectbox("Model", ai.MODELS, index=ai.MODELS.index(ai.model_name()) if ai.model_name() in ai.MODELS else 0)
+            models = ai.available_models()
+            model = st.selectbox("Model", models, index=models.index(ai.model_name()) if ai.model_name() in models else 0)
             st.caption("Checks the key frames, judges the numbers against the bands and history, writes the report.")
         else:
             use_ai = False
@@ -88,7 +94,24 @@ def upload_clip() -> str | None:
         st.session_state["upload_path"] = handle.name
         st.session_state["upload_name"] = uploaded.name
         st.session_state.pop("results", None)
+    show_uploaded_video(st.session_state["upload_path"], uploaded.name)
     return st.session_state["upload_path"]
+
+
+def show_uploaded_video(path: str, name: str) -> None:
+    """Play the uploaded clip in the page, in a column so it does not fill the screen."""
+    left, right = st.columns([2, 1])
+    with left:
+        try:
+            with open(path, "rb") as handle:
+                st.video(handle.read())
+        except Exception as error:
+            st.caption(f"Could not show the video: {error}")
+    with right:
+        st.caption(f"{name}")
+        if name.lower().endswith(".mov"):
+            st.caption("If the player stays black, the clip is HEVC (iPhone default). Safari plays it; Chrome does not. "
+                       "The analysis still works either way.")
 
 
 def calibration_panel(path: str, options: dict[str, Any]) -> None:
@@ -387,7 +410,8 @@ def save_panel(out: dict[str, Any], phase_key: str, options: dict[str, Any]) -> 
 
 
 def compare_tab(options: dict[str, Any]) -> None:
-    """Run the same phase on up to four clips and put the numbers side by side."""
+    """Run the same phase on up to four clips and compare them at the same depth as a single report."""
+    from core.coach import compare
     from core.db import save_run
     from core.render import compare_chart_png, speed_profile
     from core.lap import analyze_lap
@@ -407,6 +431,9 @@ def compare_tab(options: dict[str, Any]) -> None:
     if not uploads or len(uploads) < 2:
         st.info("Pick two to four clips.")
         return
+    comments = ""
+    if st.session_state.get("use_ai"):
+        comments = st.text_input("Coach comments for the AI comparison (optional)", key="compare_comments")
     if st.button("Compare", type="primary"):
         runs = []
         bar = st.progress(0.0, text="Analyzing...")
@@ -428,9 +455,24 @@ def compare_tab(options: dict[str, Any]) -> None:
                     for key in ("entry", "breakout", "swim_start", "wall", "start"):
                         if key in r.key_frames and align is None:
                             align = clip.frame_to_time(int(r.key_frames[key]))
-            runs.append({"label": labels[i], "clip": up.name, "results": results, "message": message, "profile": profile, "align": align})
+                key_frames = {(r.module, label): clip.frame_at(index)[:, :, ::-1]
+                              for top in results for r in [top] + list(top.details) for label, index in r.key_frames.items()}
+                frame_times = {(r.module, label): clip.frame_to_time(int(index))
+                               for top in results for r in [top] + list(top.details) for label, index in r.key_frames.items()}
+                clip_info = str(clip)
+            runs.append({"label": labels[i], "clip": up.name, "results": results, "message": message, "profile": profile,
+                         "align": align, "key_frames": key_frames, "frame_times": frame_times, "clip_info": clip_info})
+        good = [r for r in runs if not r["message"]]
+        comparison = compare([(r["label"], r["results"]) for r in good]) if len(good) >= 2 else None
+        ai_out = None
+        if comparison is not None and st.session_state.get("use_ai"):
+            from core import ai
+
+            bar.progress(0.9, text="Asking the AI to compare...")
+            ai_out = ai.compare_review(good, options=options, phase=phase_key, comments=comments,
+                                       model=st.session_state.get("ai_model"))
         bar.progress(1.0, text="Done")
-        st.session_state["compare"] = {"phase": phase_key, "runs": runs}
+        st.session_state["compare"] = {"phase": phase_key, "runs": runs, "comparison": comparison, "ai": ai_out}
     if "compare" not in st.session_state:
         return
     comp = st.session_state["compare"]
@@ -439,9 +481,133 @@ def compare_tab(options: dict[str, Any]) -> None:
         if run["message"]:
             st.warning(f"{run['label']}: {run['message']}")
     good = [r for r in runs if not r["message"]]
-    if not good:
+    if len(good) < 2:
+        if len(good) == 1:
+            st.info("Only one clip could be measured, so there is nothing to compare. Its numbers are below.")
+            show_compare_tables(good)
         return
-    # one table per module: rows = metrics, columns = clips
+    comparison = comp["comparison"]
+    labels = [r["label"] for r in good]
+
+    # 1. the speed chart, all clips on one axis
+    profiles = [(r["label"], r["profile"]) for r in good if r["profile"] is not None]
+    if profiles:
+        align_on = st.checkbox("Line the clips up on the first key moment (entry, breakout or wall)", value=True)
+        chart = compare_chart_png(profiles, [r["align"] for r in good if r["profile"] is not None] if align_on else None)
+        if chart:
+            st.image(chart, caption="Speed, all clips", use_container_width=True)
+
+    # 2. what differs: AI head-to-head when it ran, the rule-based comparison otherwise (and always below)
+    ai_out = comp.get("ai")
+    if ai_out is not None and not ai_out.ok:
+        st.warning(f"AI comparison not available: {ai_out.error}")
+        ai_out = None
+    if ai_out is not None:
+        st.subheader("Head to head (AI review)")
+        for sentence in ai_out.summary:
+            st.write(sentence)
+        if ai_out.head_to_head:
+            st.table([{"moment or number": h["moment_or_metric"], "what differs": h["comment"]} for h in ai_out.head_to_head])
+        cols = st.columns(len(labels))
+        for col, label in zip(cols, labels):
+            block = ai_out.per_clip.get(label, {})
+            col.markdown(f"**{label}**")
+            if block.get("strengths"):
+                col.markdown("Strengths")
+                for item in block["strengths"]:
+                    col.write(f"- {item}")
+            if block.get("weaknesses"):
+                col.markdown("To work on")
+                for item in block["weaknesses"]:
+                    col.write(f"- {item}")
+        if ai_out.plan:
+            st.subheader("Improvement plan, per swimmer (AI review)")
+            st.table([{"swimmer": p["clip"], "focus": p["focus"], "why": p["why"], "drill": p["drill"], "target": p["target"]}
+                      for p in ai_out.plan])
+        if ai_out.frame_checks:
+            with st.expander(f"Key frame checks ({len(ai_out.frame_checks)})", expanded=False):
+                st.table([{"clip": c.get("clip", ""), "module": c.get("module", ""), "frame": c.get("label", ""),
+                           "looks right": "yes" if c.get("looks_right") else "no", "comment": c.get("comment", "")}
+                          for c in ai_out.frame_checks])
+        st.caption(ai_out.basis)
+        st.subheader("What differs (from the numbers)")
+    else:
+        st.subheader("What differs")
+    for sentence in comparison.summary:
+        st.write(sentence)
+
+    # 3. the numbers side by side, with who is ahead
+    show_compare_tables(good, comparison)
+
+    # 4. key frames side by side: one row per moment, one column per clip
+    moments: list[tuple[str, str]] = []
+    for run in good:
+        for key in run["key_frames"]:
+            if key not in moments:
+                moments.append(key)
+    if moments:
+        st.subheader("Key moments side by side")
+        for module, label in moments:
+            st.markdown(f"**{label}** ({module.replace('_', ' ')})")
+            cols = st.columns(len(good))
+            for col, run in zip(cols, good):
+                img = run["key_frames"].get((module, label))
+                if img is None:
+                    col.caption(f"{run['label']}: not found")
+                else:
+                    t = run["frame_times"].get((module, label))
+                    col.image(img, caption=f"{run['label']}" + (f" ({t:.2f} s)" if t is not None else ""), use_container_width=True)
+
+    # 5. each clip's own summary and plan, as the single report shows them
+    st.subheader("Each clip on its own")
+    cols = st.columns(len(good))
+    for col, run in zip(cols, good):
+        advice = comparison.per_clip.get(run["label"])
+        col.markdown(f"**{run['label']}**")
+        if advice is not None:
+            for sentence in advice.summary:
+                col.write(sentence)
+            borrow = comparison.takeaways.get(run["label"]) or []
+            if borrow:
+                col.markdown("What to borrow from the others:")
+                for item in borrow:
+                    col.write(f"- {item}")
+            if advice.plan:
+                col.markdown("Plan (tentative):")
+                for p in advice.plan:
+                    col.write(f"- {p['focus']}: {p['drill']} (target {p['target']})")
+        with col.expander("Notes from the analysis"):
+            for r in run["results"]:
+                for note in r.notes:
+                    st.caption(note)
+    st.caption(comparison.basis)
+
+    # 6. downloads and saving
+    st.subheader("Downloads")
+    title = f"SSAC SplitSecond comparison: {' vs '.join(labels)}"
+    report = comparison_markdown(comparison, title, ai_out)
+    payload = {"phase": comp["phase"], "clips": [{"label": r["label"], "clip": r["clip"], "results": [x.to_dict() for x in r["results"]]}
+                                                 for r in good],
+               "comparison": comparison.to_dict(), "ai": ai_out.to_dict() if ai_out is not None else None}
+    stem = "_vs_".join(re.sub(r"[^A-Za-z0-9_-]+", "_", label) for label in labels)[:80] or "comparison"
+    c1, c2 = st.columns(2)
+    c1.download_button("Comparison report (Markdown)", report, file_name=f"{stem}_comparison.md", mime="text/markdown")
+    c2.download_button("Numbers (JSON)", json.dumps(payload, indent=1, default=str), file_name=f"{stem}_comparison.json",
+                       mime="application/json")
+    with st.expander("Comparison report", expanded=False):
+        st.markdown(report)
+    c1, c2 = st.columns([2, 1])
+    swimmer = c1.text_input("Swimmer (leave blank if the clips are different swimmers)", key="compare_swimmer")
+    if c2.button("Save all to database"):
+        ids = [save_run(r["results"], clip_name=r["clip"], swimmer=swimmer or r["label"], phase=comp["phase"],
+                        course=str(options.get("course", ""))) for r in good]
+        st.success(f"Saved runs {', '.join(str(i) for i in ids)}.")
+
+
+def show_compare_tables(good: list[dict[str, Any]], comparison: Any = None) -> None:
+    """One table per module: rows = metrics, columns = clips, plus who is ahead and by how much."""
+    labels = [r["label"] for r in good]
+    by_key = {row["key"]: row for row in comparison.rows} if comparison is not None else {}
     modules_seen: list[str] = []
     for run in good:
         for r in run["results"]:
@@ -461,22 +627,18 @@ def compare_tab(options: dict[str, Any]) -> None:
         rows = []
         for key in keys:
             row = {"metric": LABELS.get(key, key)}
-            for run in good:
-                row[run["label"]] = format_value(per_clip.get(run["label"], {}).get(key))
+            cmp_row = by_key.get(key)
+            for label in labels:
+                shown = format_value(per_clip.get(label, {}).get(key))
+                status = (cmp_row or {}).get("status", {}).get(label, "") if cmp_row else ""
+                row[label] = f"{shown} ({status})" if status else shown
+            if comparison is not None:
+                row["ahead"] = (cmp_row or {}).get("best", "") or "-"
+                row["gap"] = (cmp_row or {}).get("difference", "") or "-"
             rows.append(row)
         st.table(rows)
-    profiles = [(r["label"], r["profile"]) for r in good if r["profile"] is not None]
-    if profiles:
-        align_on = st.checkbox("Line the clips up on the first key moment (entry, breakout or wall)", value=True)
-        chart = compare_chart_png(profiles, [r["align"] for r in good if r["profile"] is not None] if align_on else None)
-        if chart:
-            st.image(chart, caption="Speed, all clips", use_container_width=True)
-    c1, c2 = st.columns([2, 1])
-    swimmer = c1.text_input("Swimmer (leave blank if the clips are different swimmers)", key="compare_swimmer")
-    if c2.button("Save all to database"):
-        ids = [save_run(r["results"], clip_name=r["clip"], swimmer=swimmer or r["label"], phase=comp["phase"],
-                        course=str(options.get("course", ""))) for r in good]
-        st.success(f"Saved runs {', '.join(str(i) for i in ids)}.")
+    if comparison is not None:
+        st.caption("good / ok / poor is the value against the reference band; 'ahead' is the better side where one exists.")
 
 
 def saved_tab() -> None:

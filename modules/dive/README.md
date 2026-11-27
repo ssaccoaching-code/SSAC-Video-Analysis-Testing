@@ -27,4 +27,11 @@ See the docstring at the top of `module.py`.
 
 ## Notes
 
-(Write down what works, what does not, and ideas for later.)
+- Oct 2026: entry distance used to be measured from the edge of the picture with an 8 m frame
+  guess (Anthony came out at 5.88 m). Now 0 m is the block edge where the feet leave and the
+  scale comes from the stretched body in flight (`swimmer_height_m`, default 1.75). Entry is
+  capped at the first sustained splash after take-off, and a vertical blob (someone walking on
+  deck in a clip that ends before the dive) is no longer reported as a dive.
+- Known rough spots: when the swimmer overlaps people or railings behind the block at take-off
+  the block edge is back-projected from the flight (a note says so); backstroke starts are not
+  dives off a block, so those numbers mean little.

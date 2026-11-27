@@ -114,9 +114,14 @@ Web page (what coaches use):
 The page has three tabs:
 
 - Analyze: one clip, as above.
-- Compare: the same phase on two to four clips (different swimmers, or one swimmer over time). The numbers
-  come out side by side and the speed curves on one chart, lined up on the entry, breakout or wall. Save all
-  four to the database in one go.
+- Compare: the same phase on two to four clips (different swimmers, or one swimmer over time). Same depth
+  as a single report, side by side: the speed curves on one chart (lined up on the entry, breakout or wall),
+  "What differs" in plain sentences with the reference band for each number, the numbers with good / ok / poor,
+  who is ahead and the gap, the key moments as frames next to each other (entry against entry ...), each clip's
+  own summary, plan and analysis notes, and what each swimmer can borrow from the others. With AI review on,
+  the AI compares the key frames and numbers head to head and writes a plan per swimmer. Download the
+  comparison as Markdown or JSON, or save all clips to the database in one go. (core/coach.py compare(),
+  core/ai.py compare_review(), core/report.py comparison_markdown()).
 - Saved results: everything in the database, one run at a time, and a CSV download of all of it.
 
 The database is a SQLite file, `results/splitsecond.db` (two tables: `runs` and `metrics`). It opens in any
@@ -146,6 +151,12 @@ Distances and speeds need to know how big a pixel is. The app tries, in this ord
 2. Both end walls in the picture (the side whole-lap camera): automatic, medium confidence.
 3. `-o frame_span_m=10` on the terminal: how many metres the picture is wide.
 4. A guess, marked low confidence in the notes.
+
+The dive module does not use the guess (4). A dive camera almost never has the start wall at the
+edge of the picture, so instead it puts 0 m at the block edge where the feet leave and takes
+the scale from the swimmer's own stretched body in flight (about 1.28 x height). Set the
+swimmer's height in the sidebar (More) or with `-o swimmer_height_m=1.80`; without it 1.75 m is
+assumed. That is still a rough number: a saved calibration (1) is the real answer.
 
 ## What each camera can and cannot measure
 

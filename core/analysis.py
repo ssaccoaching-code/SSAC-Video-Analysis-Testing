@@ -111,14 +111,7 @@ def prepare(clip: Clip, options: dict[str, Any], phase: str = "lap", start_s: fl
     if direction == 0:
         direction = cal.direction
 
-    x_m = np.asarray(cal.x_to_m(x_px), dtype=float)
-    # gaps longer than half a second stay unknown instead of being bridged
-    x_m = fill_short_gaps(np.where(track.found | np.isfinite(x_px), x_m, np.nan), int(round(0.5 * track.fps)))
-    known = fill_short_gaps(np.where(track.found, 1.0, np.nan), int(round(0.5 * track.fps)))
-    x_m = np.where(np.isfinite(known), x_m, np.nan)
-    speed = derivative(moving_average(fill_gaps(x_m), int(round(track.fps * 0.8))), track.times)
-    speed = np.where(np.isfinite(x_m), speed, np.nan)
-    speed = np.clip(speed, -MAX_SPEED_MPS, MAX_SPEED_MPS)
+    x_m, speed = metres_and_speed(track, x_px, cal)
 
     prepared = Prepared(
         track=track, cal=cal, view=view, times=track.times, x_px=x_px, y_px=y_px, x_m=x_m, speed=speed,
@@ -129,6 +122,27 @@ def prepare(clip: Clip, options: dict[str, Any], phase: str = "lap", start_s: fl
     prepared.notes.append(f"camera view: {view}; calibration: {cal.method} ({cal.confidence} confidence)")
     cache[key] = prepared
     return prepared
+
+
+def metres_and_speed(track: Track, x_px: np.ndarray, cal: Calibration) -> tuple[np.ndarray, np.ndarray]:
+    """Position in metres and speed in m/s for every frame, from a pixel track and a calibration."""
+    x_m = np.asarray(cal.x_to_m(x_px), dtype=float)
+    # gaps longer than half a second stay unknown instead of being bridged
+    x_m = fill_short_gaps(np.where(track.found | np.isfinite(x_px), x_m, np.nan), int(round(0.5 * track.fps)))
+    known = fill_short_gaps(np.where(track.found, 1.0, np.nan), int(round(0.5 * track.fps)))
+    x_m = np.where(np.isfinite(known), x_m, np.nan)
+    speed = derivative(moving_average(fill_gaps(x_m), int(round(track.fps * 0.8))), track.times)
+    speed = np.where(np.isfinite(x_m), speed, np.nan)
+    speed = np.clip(speed, -MAX_SPEED_MPS, MAX_SPEED_MPS)
+    return x_m, speed
+
+
+def recalibrate(prepared: Prepared, cal: Calibration) -> None:
+    """Swap in another calibration and redo the metres and speeds that depend on it."""
+    prepared.cal = cal
+    prepared.x_m, prepared.speed = metres_and_speed(prepared.track, prepared.x_px, cal)
+    if prepared.surface_y is None:
+        prepared.surface_y = cal.surface_y
 
 
 def _direction_from_track(track: Track, x_px: np.ndarray) -> int:

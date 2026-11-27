@@ -187,3 +187,47 @@ def coverage_message(results: list[Result], phase: str, expected_view: str | Non
         if r.module == phase and not phase_covered(r):
             return PHASE_MESSAGES.get(phase, f"Please upload a video that includes the {phase}.")
     return None
+
+
+def comparison_markdown(comparison: Any, title: str, ai_review: Any = None) -> str:
+    """The comparison as a Markdown report: the AI report when there is one, else the rule-based one, plus the numbers."""
+    labels = list(comparison.labels)
+    lines = [f"# {title}", ""]
+    if ai_review is not None and getattr(ai_review, "ok", False) and ai_review.report_md:
+        lines += [ai_review.report_md.strip(), ""]
+    else:
+        lines += ["## What differs", ""]
+        lines += [f"- {s}" for s in comparison.summary]
+        lines.append("")
+        for label in labels:
+            advice = comparison.per_clip.get(label)
+            if advice is None:
+                continue
+            lines += [f"## {label}", ""]
+            lines += [s for s in advice.summary]
+            borrow = comparison.takeaways.get(label) or []
+            if borrow:
+                lines += ["", "What to borrow from the others:"] + [f"- {b}" for b in borrow]
+            if advice.plan:
+                lines += ["", "| Focus | Why | Drill | Target |", "|---|---|---|---|"]
+                lines += [f"| {p['focus']} | {p['why']} | {p['drill']} | {p['target']} |" for p in advice.plan]
+            lines.append("")
+    lines += ["## Numbers side by side", "", "| Metric | " + " | ".join(labels) + " | Ahead | Gap |",
+              "|---|" + "---|" * (len(labels) + 2)]
+    for row in comparison.rows:
+        cells = []
+        for label in labels:
+            value = row["values"].get(label)
+            status = row["status"].get(label) or ""
+            cells.append(("not measured" if value is None else format_value(value)) + (f" ({status})" if status else ""))
+        lines.append(f"| {row['metric']} | " + " | ".join(cells) + f" | {row['best'] or '-'} | {row['difference'] or '-'} |")
+    lines.append("")
+    if ai_review is not None and getattr(ai_review, "ok", False) and ai_review.frame_checks:
+        lines += ["## Key frame checks", "", "| Clip | Module | Frame | Looks right | Comment |", "|---|---|---|---|---|"]
+        for c in ai_review.frame_checks:
+            lines.append(f"| {c.get('clip', '')} | {c.get('module', '')} | {c.get('label', '')} | "
+                         f"{'yes' if c.get('looks_right') else 'no'} | {c.get('comment', '')} |")
+        lines.append("")
+    basis = ai_review.basis if (ai_review is not None and getattr(ai_review, "ok", False)) else comparison.basis
+    lines.append(f"_{basis}_")
+    return "\n".join(lines)

@@ -24,6 +24,12 @@ blob's long axis just before entry; the path angle from the trajectory.
 Extra options this module reads:
   view=underwater|above     (auto-detected if not set)
   calib_points=x1:m1,x2:m2  (or calib_profile=name) for real distances
+  swimmer_height_m=1.75     used for the fallback scale when the camera is not calibrated
+
+Without a calibration the module does not trust the frame width. It puts 0 m
+at the block edge where the feet leave and takes the scale from the swimmer's
+own stretched body in flight (about 1.28 x height, fingertips to toes). That is
+a rough number (low confidence) but it is anchored to things in the picture.
 """
 
 from __future__ import annotations
@@ -39,6 +45,67 @@ from core.types import Result
 from core.video import Clip
 
 BODY_AREA_FRACTION = 0.0015   # of the frame: a person-sized moving blob
+DEFAULT_HEIGHT_M = 1.75       # when the swimmer's height is not given
+STRETCH_FACTOR = 1.28         # fingertips to toes in streamline, as a multiple of standing height
+
+
+def self_calibration(prep: Prepared, events: dict[str, int], swimmer_height_m: float) -> "Calibration | None":
+    """A calibration from the dive itself, for cameras that were never calibrated.
+
+    0 m is the block edge: the trailing edge of the body (the feet) on the frame
+    the swimmer leaves the block. Metres per pixel come from the longest the
+    body gets in flight, which is the swimmer stretched out, about 1.28 x height.
+    Both are read in the swimmer's own lane, so perspective and camera angle
+    cancel out for the short distance a dive covers.
+    """
+    from core.calibrate import Calibration
+
+    tr = prep.track
+    direction = events["direction"]
+    leave_k, entry_k = events["leave_block"], events["entry"]
+    n = tr.times.size
+
+    # the stretched body in flight: widest clean blob between take-off and entry
+    flight = [k for k in range(leave_k + 1, entry_k + 1) if tr.found[k] and np.isfinite(tr.left[k]) and np.isfinite(tr.right[k])]
+    if len(flight) < 3:
+        return None
+    whites = np.array([tr.white[k] for k in flight])
+    clean = [k for k, w in zip(flight, whites) if w <= max(0.3 * whites.max(), 1.0)] or flight
+    extents = np.array([tr.right[k] - tr.left[k] for k in clean])
+    body_px = float(np.percentile(extents, 90))
+    if body_px < 20:
+        return None
+    m_per_px = STRETCH_FACTOR * swimmer_height_m / body_px
+
+    # the feet on the block edge, just as they leave
+    trailing = tr.right if direction < 0 else tr.left
+    leading = tr.left if direction < 0 else tr.right
+    near = [k for k in range(leave_k, min(n, leave_k + 3)) if tr.found[k] and np.isfinite(trailing[k])]
+    if not near:
+        return None
+    wall_x = float(max(trailing[k] for k in near) if direction < 0 else min(trailing[k] for k in near))
+    merged = False
+    if float(tr.right[near[0]] - tr.left[near[0]]) > 1.1 * body_px:
+        # the blob at take-off also covers people or railings behind the block, so its
+        # trailing edge is not the feet. Take the first clean flight frame and move the
+        # feet back to the block at the flight speed.
+        merged = True
+        clean_k = [k for k in flight if tr.right[k] - tr.left[k] <= 1.1 * body_px]
+        if len(clean_k) >= 2:
+            c = clean_k[0]
+            steps = np.abs(np.diff([leading[k] for k in clean_k[:6]]))
+            vx = float(np.median(steps)) if steps.size else 0.0
+            wall_x = float(trailing[c] - direction * vx * (c - leave_k))
+    far_x = wall_x + direction * 1000.0
+    cal = Calibration([(wall_x, 0.0), (far_x, 1000.0 * m_per_px)], lane_y=prep.cal.lane_y, surface_y=prep.cal.surface_y,
+                      wall_x=wall_x, method="dive_self", confidence="low")
+    cal.notes.append(f"dive: no camera calibration, so 0 m is the block edge where the feet leave (x={wall_x:.0f} px) and the "
+                     f"scale assumes a {swimmer_height_m:.2f} m swimmer stretched to {STRETCH_FACTOR * swimmer_height_m:.2f} m "
+                     f"({body_px:.0f} px in flight). Rough; set swimmer_height_m or calibrate the camera for a real number.")
+    if merged:
+        cal.notes.append("dive: at take-off the swimmer overlapped people or railings behind the block, so the block edge was "
+                         "estimated from the flight; the entry distance could be off by a few tenths of a metre.")
+    return cal
 
 
 def detect_start_flash(clip: Clip, before_s: float, step: int = 1) -> float | None:
@@ -125,6 +192,37 @@ def find_dive_events(prep: Prepared, frame_area: float) -> dict[str, int] | None
     if entry_k is None:
         entry_k = min(n - 1, peak_k + int(round(0.3 * fps)))
 
+    # the first sustained burst of foam after take-off is the hands hitting the water;
+    # the entry can never be later than that (the big splash comes after it)
+    # (the blob often overlaps white railings and caps behind the block at take-off,
+    # so the search starts after the white has gone quiet in flight)
+    splash_k = None
+    span = white[leave_k : horizon + 1]
+    if span.size >= 6 and np.isfinite(span).any():
+        base, top = float(np.nanmin(span)), float(np.nanmax(span))
+        quiet_level = base + 0.1 * (top - base)
+        quiet_k = None
+        for k in range(leave_k + 1, horizon - 1):
+            if np.all(white[k : k + 3] <= quiet_level):
+                quiet_k = k
+                break
+        if quiet_k is not None:
+            top = float(np.nanmax(white[quiet_k : horizon + 1]))
+            level = base + max(0.25 * (top - base), 8.0)
+            if top - base >= 20.0:
+                for k in range(quiet_k + 3, horizon - 1):
+                    if np.all(white[k : k + 3] >= level):
+                        splash_k = k
+                        break
+    if splash_k is not None and splash_k < entry_k:
+        entry_k = splash_k
+
+    # a dive is a body going roughly head-first into the water; a person standing or
+    # walking on deck is a vertical blob the whole way, and no dive at all
+    flight = (k_all > leave_k) & (k_all <= entry_k) & body & np.isfinite(tr.angle)
+    if flight.sum() >= 3 and float(np.median(np.abs(tr.angle[flight]))) > 65.0:
+        return None
+
     # movement: walk back from leave_block while the blob stays body-sized;
     # before the swimmer moves there is no blob (or a much smaller one)
     near = (k_all >= max(0, leave_k - int(round(0.1 * fps)))) & (k_all <= min(n - 1, leave_k + int(round(0.1 * fps)))) & body
@@ -183,15 +281,21 @@ class DiveModule(AnalysisModule):
         if not (0.15 < flight_check < 1.2) or too_far:
             result.notes.append("dive: no dive seen in this clip (nothing flies off a block into a splash near the wall)")
             return result
-        if prep.cal.method == "walls" and np.isfinite(lead_m) and not (0.3 < lead_m < 7.0):
-            # a dive camera rarely shows both walls; that guess was wrong, so use the plain default scale
-            from core.calibrate import Calibration, DEFAULT_SPAN_M
+        guessed = prep.cal.confidence == "low" or prep.cal.method == "default"
+        walls_wrong = prep.cal.method == "walls" and np.isfinite(lead_m) and not (0.3 < lead_m < 7.0)
+        if guessed or walls_wrong:
+            # the frame-width guess (and a wall guess on a camera that shows one wall) put 0 m at the
+            # edge of the picture; a dive camera almost never does. Read wall and scale off the dive itself.
+            from core.analysis import recalibrate
 
-            span = DEFAULT_SPAN_M["dive"]
-            points = [(0.0, 0.0), (float(clip.width), span)] if events["direction"] > 0 else [(float(clip.width), 0.0), (0.0, span)]
-            prep.cal = Calibration(points, lane_y=prep.cal.lane_y, method="default", confidence="low")
-            result.notes.append("dive: the automatic wall calibration did not fit this clip; distances use a guessed scale. "
-                                "Save a calibration for the dive camera to get real numbers.")
+            height = float(options.get("swimmer_height_m") or DEFAULT_HEIGHT_M)
+            own = self_calibration(prep, events, height)
+            if own is not None:
+                recalibrate(prep, own)
+                result.notes.extend(own.notes)
+            elif walls_wrong:
+                result.notes.append("dive: the automatic wall calibration did not fit this clip and the dive itself could not be "
+                                    "measured; distances use a guessed scale. Save a calibration for the dive camera.")
         result.metrics["movement_time_s"] = round(float(tr.times[move_k]), 3)
         result.metrics["entry_time_s"] = round(entry_t, 3)
         result.key_frames["movement"] = int(tr.indexes[move_k])
@@ -241,7 +345,7 @@ class DiveModule(AnalysisModule):
             metres = float(prep.cal.x_to_m(lead))
             result.metrics["entry_distance_m"] = round(metres, 2)
             if prep.cal.confidence == "low":
-                result.notes.append("dive: entry distance uses a guessed scale; calibrate the camera for a real number")
+                result.notes.append("dive: entry distance uses a rough scale; calibrate the camera for a real number")
 
         # depth: only when we can see below the surface
         if prep.view == "underwater" and prep.surface_y is not None:
